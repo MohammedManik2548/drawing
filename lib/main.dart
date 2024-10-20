@@ -31,8 +31,9 @@ class DrawingCanvas extends StatefulWidget {
 
 class _DrawingCanvasState extends State<DrawingCanvas> {
   List<Offset?> points = [];
+  List<Uint8List> savedDrawings = []; // Store multiple drawings
   Database? database;
-  GlobalKey _globalKey = GlobalKey(); // Use GlobalKey to capture the widget size
+  GlobalKey _globalKey = GlobalKey();
 
   @override
   void initState() {
@@ -53,12 +54,12 @@ class _DrawingCanvasState extends State<DrawingCanvas> {
     );
   }
 
-  // Save the full canvas drawing based on widget size
-  Future<void> saveFullDrawing(BuildContext context) async {
+  // Save individual drawing and store it in the list
+  Future<void> saveIndividualDrawing(BuildContext context) async {
     RenderRepaintBoundary boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-    final size = boundary.size; // Capture the actual widget size
+    final size = boundary.size;
     final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height)); // Use dynamic size
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height));
     final paint = Paint()
       ..color = Colors.black
       ..strokeCap = StrokeCap.round
@@ -72,22 +73,112 @@ class _DrawingCanvasState extends State<DrawingCanvas> {
     }
 
     final picture = recorder.endRecording();
-    final img = await picture.toImage(size.width.toInt(), size.height.toInt()); // Create image using widget size
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png); // Convert to PNG
-    final pngBytes = byteData!.buffer.asUint8List(); // Get bytes to store
+    final img = await picture.toImage(size.width.toInt(), size.height.toInt());
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    final pngBytes = byteData!.buffer.asUint8List();
 
-    // Insert the image data into SQLite as a BLOB
-    await database?.insert('drawings', {'image': pngBytes});
+    savedDrawings.add(pngBytes); // Store this drawing
+    setState(() {
+      points.clear(); // Clear the current canvas after saving
+    });
 
     // Display a success message
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Full drawing saved!')),
+      SnackBar(content: Text('Drawing saved!')),
     );
   }
 
-  // Retrieve all saved drawings from SQLite
-  Future<List<Map<String, dynamic>>> loadAllDrawings() async {
-    return await database?.query('drawings') ?? [];
+  // Combine all saved drawings into one image without space between them
+  Future<void> combineDrawings(BuildContext context) async {
+    if (savedDrawings.length < 3) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Please save three drawings first!')),
+      );
+      return;
+    }
+
+    RenderRepaintBoundary boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    final size = boundary.size;
+    final recorder = ui.PictureRecorder();
+
+    // Total height to combine all images without space
+    final double totalHeight = size.height * savedDrawings.length;
+
+    // Create a canvas large enough to fit all images
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, totalHeight));
+
+    // Loop over each saved drawing and place them directly below each other
+    for (int i = 0; i < savedDrawings.length; i++) {
+      final img = await decodeImageFromList(savedDrawings[i]);
+      final double yOffset = i * size.height;  // Calculate the vertical position of each image
+
+      // Draw each image at the calculated yOffset
+      canvas.drawImageRect(
+        img,
+        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),  // Source rect for the full image
+        Rect.fromLTWH(0, yOffset, size.width, size.height),  // Destination on the combined canvas
+        Paint(),
+      );
+    }
+
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(size.width.toInt(), totalHeight.toInt());  // Combine images into one
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    final pngBytes = byteData!.buffer.asUint8List();
+
+    // Save the combined image to SQLite as a single image
+    await database?.insert('drawings', {'image': pngBytes});
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('All drawings combined and saved!')),
+    );
+  }
+
+  // // // Combine all saved drawings into one image
+  // Future<void> combineDrawings(BuildContext context) async {
+  //   if (savedDrawings.length < 3) {
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(content: Text('Please save three drawings first!')),
+  //     );
+  //     return;
+  //   }
+  //
+  //   RenderRepaintBoundary boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+  //   final size = boundary.size;
+  //   final recorder = ui.PictureRecorder();
+  //   final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height));
+  //
+  //   // Combine each saved drawing by drawing them onto the canvas
+  //   for (int i = 0; i < savedDrawings.length; i++) {
+  //     final img = await decodeImageFromList(savedDrawings[i]);
+  //     canvas.drawImage(img, Offset(0, i * (size.height / 3)), Paint()); // Position each drawing
+  //   }
+  //
+  //   final picture = recorder.endRecording();
+  //   final img = await picture.toImage(size.width.toInt(), size.height.toInt());
+  //   final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+  //   final pngBytes = byteData!.buffer.asUint8List();
+  //
+  //   // Save the combined image to SQLite as a single image
+  //   await database?.insert('drawings', {'image': pngBytes});
+  //
+  //   ScaffoldMessenger.of(context).showSnackBar(
+  //     SnackBar(content: Text('All drawings combined and saved!')),
+  //   );
+  // }
+
+  // Retrieve the latest combined drawing from SQLite
+  Future<Uint8List?> loadCombinedDrawing() async {
+    final data = await database?.query(
+      'drawings',
+      orderBy: 'id DESC', // Get the most recent combined image
+      limit: 1, // Only get the last combined image
+    );
+
+    if (data != null && data.isNotEmpty) {
+      return data.first['image'] as Uint8List; // Return the image data
+    }
+    return null;
   }
 
   @override
@@ -107,8 +198,8 @@ class _DrawingCanvasState extends State<DrawingCanvas> {
             points.add(null);
           });
         },
-        child: RepaintBoundary( // Use RepaintBoundary to capture the widget
-          key: _globalKey, // Attach GlobalKey
+        child: RepaintBoundary(
+          key: _globalKey,
           child: CustomPaint(
             painter: CanvasPainter(points),
             child: Container(),
@@ -119,31 +210,37 @@ class _DrawingCanvasState extends State<DrawingCanvas> {
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
           FloatingActionButton(
-            heroTag: 'saveFullDrawing',
+            heroTag: 'saveIndividual',
             child: Icon(Icons.save),
             onPressed: () async {
-              await saveFullDrawing(context);
-              setState(() {
-                points.clear(); // Clear canvas after saving
-              });
+              await saveIndividualDrawing(context);
             },
           ),
           SizedBox(height: 16),
           FloatingActionButton(
-            heroTag: 'viewDrawings',
+            heroTag: 'combineDrawings',
+            child: Icon(Icons.layers),
+            onPressed: () async {
+              await combineDrawings(context); // Combine all saved drawings
+            },
+          ),
+          SizedBox(height: 16),
+          FloatingActionButton(
+            heroTag: 'viewCombinedDrawing',
             child: Icon(Icons.image),
             onPressed: () async {
-              List<Map<String, dynamic>> drawings = await loadAllDrawings();
-              if (drawings.isNotEmpty) {
+              Uint8List? combinedImage = await loadCombinedDrawing(); // Load the combined image
+
+              if (combinedImage != null) {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => DrawingListScreen(drawings: drawings),
+                    builder: (context) => CombinedDrawingScreen(imageData: combinedImage),
                   ),
                 );
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('No saved drawings!')),
+                  SnackBar(content: Text('No combined drawing found!')),
                 );
               }
             },
@@ -179,52 +276,19 @@ class CanvasPainter extends CustomPainter {
   }
 }
 
-// Screen to display the list of saved drawings
-class DrawingListScreen extends StatelessWidget {
-  final List<Map<String, dynamic>> drawings;
-
-  DrawingListScreen({required this.drawings});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Saved Drawings'),
-      ),
-      body: ListView.builder(
-        itemCount: drawings.length,
-        itemBuilder: (context, index) {
-          return ListTile(
-            title: Text('Drawing #${drawings[index]['id']}'),
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => ImageScreen(imageData: drawings[index]['image']),
-                ),
-              );
-            },
-          );
-        },
-      ),
-    );
-  }
-}
-
-// Screen to display a single saved drawing
-class ImageScreen extends StatelessWidget {
+class CombinedDrawingScreen extends StatelessWidget {
   final Uint8List imageData;
 
-  ImageScreen({required this.imageData});
+  CombinedDrawingScreen({required this.imageData});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Saved Drawing'),
+        title: Text('Combined Drawing'),
       ),
       body: Center(
-        child: Image.memory(imageData), // Display image from Uint8List data
+        child: Image.memory(imageData), // Display the combined drawing
       ),
     );
   }
