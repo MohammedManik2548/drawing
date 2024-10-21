@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "750859433367",
+    "project_id": "drawing-791fc",
+    "storage_bucket": "drawing-791fc.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:750859433367:android:f0b7bfc30011ab2f0700d2",
+        "android_client_info": {
+          "package_name": "com.usl.drawing"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBt_829OCi9U3UG35YKqUj947MOJO_LiSA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
