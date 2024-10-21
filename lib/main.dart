@@ -1,251 +1,183 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart';
-import 'dart:ui' as ui;
 import 'dart:typed_data';
-import 'dart:io';
 
-void main() {
-  runApp(DrawingApp());
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/rendering.dart';
+import 'package:get/get.dart';
+import 'package:get/get.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'dart:ui' as ui;
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    print('Error initializing Firebase: $e');
+  }
+  runApp(MyApp());
 }
 
-class DrawingApp extends StatelessWidget {
+class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Drawing App',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
-      home: DrawingCanvas(),
+    return GetMaterialApp(
+      title: 'Multiplayer Drawing App',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: HomeScreen(),
     );
   }
 }
 
-class DrawingCanvas extends StatefulWidget {
-  @override
-  _DrawingCanvasState createState() => _DrawingCanvasState();
-}
 
-class _DrawingCanvasState extends State<DrawingCanvas> {
-  List<Offset?> points = [];
-  List<Uint8List> savedDrawings = []; // Store multiple drawings
-  Database? database;
-  GlobalKey _globalKey = GlobalKey();
 
-  @override
-  void initState() {
-    super.initState();
-    initializeDatabase(); // Initialize the SQLite database
-  }
+class GameController extends GetxController {
+  var players = [].obs;
+  var isLoading = false.obs;
+  final GlobalKey globalKey = GlobalKey();
 
-  // Initialize SQLite database
-  Future<void> initializeDatabase() async {
-    final directory = await getApplicationDocumentsDirectory();
-    final path = join(directory.path, 'drawing_app.db');
-    database = await openDatabase(
-      path,
-      version: 1,
-      onCreate: (db, version) {
-        return db.execute('CREATE TABLE drawings(id INTEGER PRIMARY KEY AUTOINCREMENT, image BLOB)');
-      },
-    );
-  }
+  // Firebase Firestore reference
+  final FirebaseFirestore firestore = FirebaseFirestore.instance;
 
-  // Save individual drawing and store it in the list
-  Future<void> saveIndividualDrawing(BuildContext context) async {
-    RenderRepaintBoundary boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-    final size = boundary.size;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height));
-    final paint = Paint()
-      ..color = Colors.black
-      ..strokeCap = StrokeCap.round
-      ..strokeWidth = 5.0;
+  // Start the game by assigning parts to players
+  void startGame(String gameId) async {
+    isLoading(true);
 
-    // Paint the points (lines) on the canvas
-    for (int i = 0; i < points.length - 1; i++) {
-      if (points[i] != null && points[i + 1] != null) {
-        canvas.drawLine(points[i]!, points[i + 1]!, paint);
-      }
-    }
+    // Mock assignment, you can randomize this
+    players.value = [
+      {'player_id': 'user1', 'part': 'head'},
+      {'player_id': 'user2', 'part': 'body'},
+    ];
 
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(size.width.toInt(), size.height.toInt());
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-    final pngBytes = byteData!.buffer.asUint8List();
-
-    savedDrawings.add(pngBytes); // Store this drawing
-    setState(() {
-      points.clear(); // Clear the current canvas after saving
+    // Save initial game data to Firebase
+    await firestore.collection('games').doc(gameId).set({
+      'players': players.map((e) => {
+        'player_id': e['player_id'],
+        'part': e['part'],
+        'drawing_url': ''
+      }).toList(),
+      'status': 'in_progress'
     });
 
-    // Display a success message
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Drawing saved!')),
-    );
+    isLoading(false);
   }
 
-  // Combine all saved drawings into one image without space between them
-  Future<void> combineDrawings(BuildContext context) async {
-    if (savedDrawings.length < 3) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Please save three drawings first!')),
-      );
-      return;
-    }
+  // Submit a player's drawing
+  Future<void> submitDrawing(List<Offset?> points, String part, String playerId) async {
+    isLoading(true);
 
-    RenderRepaintBoundary boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-    final size = boundary.size;
-    final recorder = ui.PictureRecorder();
+    // Convert drawing to an image or points to be stored (same as before)
+    final String imageUrl = await uploadDrawing(points, playerId, part);
 
-    // Total height to combine all images without space
-    final double totalHeight = size.height * savedDrawings.length;
+    // Update Firestore with the drawing URL
+    await firestore.collection('games').doc('gameId').update({
+      'players': FieldValue.arrayUnion([{
+        'player_id': playerId,
+        'part': part,
+        'drawing_url': imageUrl,
+      }])
+    });
 
-    // Create a canvas large enough to fit all images
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, totalHeight));
-
-    // Loop over each saved drawing and place them directly below each other
-    for (int i = 0; i < savedDrawings.length; i++) {
-      final img = await decodeImageFromList(savedDrawings[i]);
-      final double yOffset = i * size.height;  // Calculate the vertical position of each image
-
-      // Draw each image at the calculated yOffset
-      canvas.drawImageRect(
-        img,
-        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),  // Source rect for the full image
-        Rect.fromLTWH(0, yOffset, size.width, size.height),  // Destination on the combined canvas
-        Paint(),
-      );
-    }
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(size.width.toInt(), totalHeight.toInt());  // Combine images into one
-    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-    final pngBytes = byteData!.buffer.asUint8List();
-
-    // Save the combined image to SQLite as a single image
-    await database?.insert('drawings', {'image': pngBytes});
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('All drawings combined and saved!')),
-    );
+    isLoading(false);
   }
 
-  // // // Combine all saved drawings into one image
-  // Future<void> combineDrawings(BuildContext context) async {
-  //   if (savedDrawings.length < 3) {
-  //     ScaffoldMessenger.of(context).showSnackBar(
-  //       SnackBar(content: Text('Please save three drawings first!')),
-  //     );
-  //     return;
-  //   }
-  //
-  //   RenderRepaintBoundary boundary = _globalKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-  //   final size = boundary.size;
-  //   final recorder = ui.PictureRecorder();
-  //   final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height));
-  //
-  //   // Combine each saved drawing by drawing them onto the canvas
-  //   for (int i = 0; i < savedDrawings.length; i++) {
-  //     final img = await decodeImageFromList(savedDrawings[i]);
-  //     canvas.drawImage(img, Offset(0, i * (size.height / 3)), Paint()); // Position each drawing
-  //   }
-  //
-  //   final picture = recorder.endRecording();
-  //   final img = await picture.toImage(size.width.toInt(), size.height.toInt());
-  //   final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-  //   final pngBytes = byteData!.buffer.asUint8List();
-  //
-  //   // Save the combined image to SQLite as a single image
-  //   await database?.insert('drawings', {'image': pngBytes});
-  //
-  //   ScaffoldMessenger.of(context).showSnackBar(
-  //     SnackBar(content: Text('All drawings combined and saved!')),
-  //   );
-  // }
+  // Function to upload the drawing to Firebase Storage
+  Future<String> uploadDrawing(List<Offset?> points, String playerId, String part) async {
+    // Create a RepaintBoundary and a corresponding render object
+    final boundary = await _capturePng(points);
 
-  // Retrieve the latest combined drawing from SQLite
-  Future<Uint8List?> loadCombinedDrawing() async {
-    final data = await database?.query(
-      'drawings',
-      orderBy: 'id DESC', // Get the most recent combined image
-      limit: 1, // Only get the last combined image
-    );
+    if (boundary == null) return '';
 
-    if (data != null && data.isNotEmpty) {
-      return data.first['image'] as Uint8List; // Return the image data
-    }
-    return null;
+    // Convert boundary to a PNG image
+    final imageBytes = await _boundaryToBytes(boundary);
+
+    // Create Firebase Storage reference
+    final storageRef = FirebaseStorage.instance
+        .ref()
+        .child('drawings/$playerId-$part.png');
+
+    // Upload image data to Firebase Storage
+    final uploadTask = await storageRef.putData(imageBytes);
+
+    // Get and return the download URL
+    final imageUrl = await uploadTask.ref.getDownloadURL();
+    return imageUrl;
   }
+
+  // Capture the drawing canvas and return RenderRepaintBoundary
+  Future<RenderRepaintBoundary?> _capturePng(List<Offset?> points) async {
+    final boundary = globalKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+    return boundary;
+  }
+
+  // Convert the boundary to PNG bytes
+  Future<Uint8List> _boundaryToBytes(RenderRepaintBoundary boundary) async {
+    // Generate an image from the canvas with desired dimensions
+    final ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+
+    // Convert the image to bytes (PNG format)
+    final ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
+
+  // Widget to render the drawing on the screen for capturing
+  Widget buildDrawingCanvas(List<Offset?> points) {
+    return RepaintBoundary(
+      key: globalKey,
+      child: CustomPaint(
+        painter: CanvasPainter(points),
+        size: Size.infinite,
+      ),
+    );
+  }
+}
+
+
+
+class DrawingCanvas extends StatelessWidget {
+  final String playerId;
+  final String part;
+
+  DrawingCanvas({required this.playerId, required this.part});
+
+  final GameController gameController = Get.find<GameController>();
 
   @override
   Widget build(BuildContext context) {
+    List<Offset?> points = [];
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('Flutter Drawing Canvas'),
+        title: Text('Draw $part'),
+        actions: [
+          Obx(() => gameController.isLoading.value
+              ? CircularProgressIndicator()
+              : IconButton(
+            icon: Icon(Icons.save),
+            onPressed: () {
+              gameController.submitDrawing(points, part, playerId);
+            },
+          )),
+        ],
       ),
       body: GestureDetector(
         onPanUpdate: (details) {
-          setState(() {
-            points.add(details.localPosition);
-          });
+          points.add(details.localPosition);
         },
         onPanEnd: (details) {
-          setState(() {
-            points.add(null);
-          });
+          points.add(null); // End of line
         },
-        child: RepaintBoundary(
-          key: _globalKey,
-          child: CustomPaint(
-            painter: CanvasPainter(points),
-            child: Container(),
-          ),
+        child: CustomPaint(
+          painter: CanvasPainter(points),
+          size: Size.infinite,
         ),
-      ),
-      floatingActionButton: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton(
-            heroTag: 'saveIndividual',
-            child: Icon(Icons.save),
-            onPressed: () async {
-              await saveIndividualDrawing(context);
-            },
-          ),
-          SizedBox(height: 16),
-          FloatingActionButton(
-            heroTag: 'combineDrawings',
-            child: Icon(Icons.layers),
-            onPressed: () async {
-              await combineDrawings(context); // Combine all saved drawings
-            },
-          ),
-          SizedBox(height: 16),
-          FloatingActionButton(
-            heroTag: 'viewCombinedDrawing',
-            child: Icon(Icons.image),
-            onPressed: () async {
-              Uint8List? combinedImage = await loadCombinedDrawing(); // Load the combined image
-
-              if (combinedImage != null) {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => CombinedDrawingScreen(imageData: combinedImage),
-                  ),
-                );
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('No combined drawing found!')),
-                );
-              }
-            },
-          ),
-        ],
       ),
     );
   }
@@ -253,15 +185,14 @@ class _DrawingCanvasState extends State<DrawingCanvas> {
 
 class CanvasPainter extends CustomPainter {
   final List<Offset?> points;
-
   CanvasPainter(this.points);
 
   @override
   void paint(Canvas canvas, Size size) {
-    Paint paint = Paint()
+    final paint = Paint()
       ..color = Colors.black
-      ..strokeCap = StrokeCap.round
-      ..strokeWidth = 5.0;
+      ..strokeWidth = 4.0
+      ..strokeCap = StrokeCap.round;
 
     for (int i = 0; i < points.length - 1; i++) {
       if (points[i] != null && points[i + 1] != null) {
@@ -271,15 +202,13 @@ class CanvasPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(CustomPainter oldDelegate) {
-    return true;
-  }
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
 
-class CombinedDrawingScreen extends StatelessWidget {
-  final Uint8List imageData;
 
-  CombinedDrawingScreen({required this.imageData});
+
+class CombinedDrawingScreen extends StatelessWidget {
+  final GameController gameController = Get.find<GameController>();
 
   @override
   Widget build(BuildContext context) {
@@ -287,8 +216,56 @@ class CombinedDrawingScreen extends StatelessWidget {
       appBar: AppBar(
         title: Text('Combined Drawing'),
       ),
+      body: FutureBuilder<DocumentSnapshot>(
+        future: gameController.firestore.collection('games').doc('gameId').get(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Center(child: CircularProgressIndicator());
+          }
+
+          final players = snapshot.data!['players'];
+          return Stack(
+            children: players.map<Widget>((player) {
+              return Positioned(
+                child: Image.network(player['drawing_url']),
+              );
+            }).toList(),
+          );
+        },
+      ),
+    );
+  }
+}
+
+
+
+class HomeScreen extends StatelessWidget {
+  final GameController gameController = Get.put(GameController());
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Multiplayer Drawing App'),
+      ),
       body: Center(
-        child: Image.memory(imageData), // Display the combined drawing
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Obx(() => gameController.isLoading.value
+                ? CircularProgressIndicator()
+                : ElevatedButton(
+              onPressed: () {
+                // Start game and assign parts
+                gameController.startGame('gameId');
+
+                // Navigate to DrawingCanvas for this player (part assignment needed)
+                Get.to(() => DrawingCanvas(playerId: 'user1', part: 'head'));
+              },
+              child: Text('Start Drawing'),
+            )),
+          ],
+        ),
       ),
     );
   }
